@@ -519,6 +519,13 @@ net_slirp_init(const netcard_t *card, const uint8_t *mac_addr, UNUSED(void *priv
     struct in_addr  mask       = { .s_addr = htonl(0xffffff00) };    /* 255.255.255.0 */
     struct in_addr  bind       = { .s_addr = htonl(0x00000000) };    /* 0.0.0.0 */
 
+    /* PXE/TFTP boot support. All three are unset by default, which reproduces
+       the stock behaviour of leaving SLiRP's TFTP server disabled. Set
+       tftp_path in the [Network] section of the config to enable it. */
+    const char *bootfile         = config_get_string("Network", "bootfile", NULL);
+    const char *tftp_server_name = config_get_string("Network", "tftp_server_name", NULL);
+    const char *tftp_path        = config_get_string("Network", "tftp_path", NULL);
+
     const SlirpConfig slirp_config = {
 #if SLIRP_CHECK_VERSION(4, 9, 0)
         .version = 6,
@@ -535,9 +542,9 @@ net_slirp_init(const netcard_t *card, const uint8_t *mac_addr, UNUSED(void *priv
         .vprefix_len           = 64,
         .vhost6                = { .s6_addr = { 0xfe, 0xc0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02 } }, /* fec0::2 - unused */
         .vhostname             = "86Box",
-        .tftp_server_name      = NULL,
-        .tftp_path             = NULL,
-        .bootfile              = NULL,
+        .tftp_server_name      = tftp_server_name,
+        .tftp_path             = tftp_path,
+        .bootfile              = bootfile,
         .vdhcp_start           = dhcp,
         .vnameserver           = dns,
         .vnameserver6          = { .s6_addr = { 0xfe, 0xc0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03 } }, /* fec0::3 - unused */
