@@ -47,6 +47,10 @@ typedef struct video_card_migrate_t {
     const char     *old_internal_name;
 } video_card_migrate_t;
 
+extern const device_t ati_rage128_pro_pf_device;
+extern const device_t ati_xpert128_re_pci_device;
+extern const device_t ati_all_in_wonder128_re_pci_device;
+
 static video_timings_t timing_default = { .type = VIDEO_ISA, .write_b = 8, .write_w = 16, .write_l = 32, .read_b = 8, .read_w = 16, .read_l = 32 };
 
 static int was_reset = 0;
@@ -198,7 +202,10 @@ video_cards[] = {
     { .device = &tgui9660_pci_device,                           .flags = VIDEO_FLAG_TYPE_NONE      },
     { .device = &tgui9680_pci_device,                           .flags = VIDEO_FLAG_TYPE_NONE      },
     { .device = &et4000w32p_pci_device,                         .flags = VIDEO_FLAG_TYPE_NONE      },
+    { .device = &ati_xpert128_re_pci_device,                   .flags = VIDEO_FLAG_TYPE_NONE      },
+    { .device = &ati_all_in_wonder128_re_pci_device,           .flags = VIDEO_FLAG_TYPE_NONE      },
     /* AGP */
+    { .device = &ati_rage128_pro_pf_device,                     .flags = VIDEO_FLAG_TYPE_NONE      },
     { .device = &voodoo_banshee_agp_device,                     .flags = VIDEO_FLAG_TYPE_NONE      },
     { .device = &velocity_100_agp_device,                       .flags = VIDEO_FLAG_TYPE_NONE      },
     { .device = &velocity_200_agp_device,                       .flags = VIDEO_FLAG_TYPE_NONE      },
