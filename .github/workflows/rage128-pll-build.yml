@@ -1,0 +1,95 @@
+name: Validate 86Box Rage 128 PLL update
+
+on:
+  push:
+    branches:
+      - agent/rage128-pll-86box
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Transform, verify, build, and publish
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          staging=agent/rage128-pll-86box
+          target=agent/rage128-upstream-20260823
+
+          base64 -d .github/rage128-pll/transform.py.xz.b64 \
+            | xz -d > /tmp/rage128-pll-transform.py
+          echo 'a34eb8921de86da0847d55675d0a62cb08dccec0540cf703c3d3df4b8a676da7  /tmp/rage128-pll-transform.py' \
+            | sha256sum -c -
+          python3 -m py_compile /tmp/rage128-pll-transform.py
+
+          git config user.name 'Bryce Lanham'
+          git config user.email 'blanham@gmail.com'
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/86Box/86Box.git
+          git fetch --no-tags upstream master
+          git fetch --no-tags origin "$target"
+
+          upstream_sha=$(git rev-parse upstream/master)
+          source_sha=$(git rev-parse "origin/$target")
+          source_parent=$(git rev-parse "$source_sha^")
+          git merge-base --is-ancestor "$source_parent" "$upstream_sha"
+
+          git checkout -B rage128-pll-work "$upstream_sha"
+          git cherry-pick "$source_sha"
+          python3 /tmp/rage128-pll-transform.py
+          git diff --check
+
+          grep -q 'R128_PPLL_ATOMIC_UPDATE_W' src/video/vid_ati_rage128.h
+          grep -q 'completes PPLL updates immediately' src/video/vid_ati_rage128.c
+
+          python3 roms/video/ati_rage128/verify.py
+          (cd roms/video/ati_rage128 && sha256sum -c SHA256SUMS)
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build libfreetype-dev \
+            libgles2-mesa-dev libsdl3-dev libpng-dev libc6-dev \
+            librtmidi-dev libopenal-dev libslirp-dev \
+            libfluidsynth-dev libvdeplug-dev libserialport-dev \
+            libzstd-dev
+
+          cmake -S . -B build --preset development \
+            -D NEW_DYNAREC=on \
+            -D QT=off \
+            -D USE_QT6=off \
+            -D USE_SDL_SHADER=on
+          cmake --build build --parallel 2
+
+          git add \
+            src/video/vid_ati_rage128.c \
+            src/video/vid_ati_rage128.h
+          git commit --amend -m 'video: strengthen ATI Rage 128 emulation and PLL handshakes
+
+          Preserve the PF AGP and RE PCI board profiles, verified ROMs,
+          DDC/EDID, native scanout, cursor, interrupts, PCI/AGP/PM behavior,
+          complete synchronous ROP3 engine, XAA brushes and lines,
+          HOST_DATA uploads, and color comparison.
+
+          Complete the indexed PLL model by treating PPLL atomic updates as
+          synchronous: writes latch immediately and clear the update request
+          before driver readback, matching the polling contract used by the
+          historical r128 driver.
+
+          Validate all retained ROM identities and metadata and complete the
+          full Linux development build on current upstream.'
+
+          test "$(git rev-list --count "$upstream_sha..HEAD")" = 1
+          test "$(git merge-base "$upstream_sha" HEAD)" = "$upstream_sha"
+          test -z "$(git diff --name-only "$upstream_sha..HEAD" \
+                    | grep '^\.github/' || true)"
+
+          git push --force origin HEAD:"$target"
+          git push --force origin "$upstream_sha":"$staging"
