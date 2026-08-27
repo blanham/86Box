@@ -1,0 +1,293 @@
+name: Validate and publish 86Box Rage 128 CCE/PM4 and textured 3D
+
+on:
+  push:
+    branches:
+      - agent/rage128-cce3d-86box
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebase, generate, validate, build, and publish
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          staging=agent/rage128-cce3d-86box
+          target=agent/rage128-upstream-20260823
+          qemu_source=2a1e106358b83ca3fea63b9b376cd457d4983aa1
+
+          cp .github/rage128-cce3d/transform.py.xz \
+             /tmp/rage128-cce3d-transform.py.xz
+          cp .github/rage128-cce3d/standalone.c.xz \
+             /tmp/rage128-cce3d-standalone.c.xz
+          echo '004f36d030e42f347427b5bf6f2cadfa053609e0c885f8d721308f3ba5b014f2  /tmp/rage128-cce3d-transform.py.xz' \
+            | sha256sum -c -
+          echo '583370dacd9d9890b6754e83515d661477fc6d1e57f36fa5dfc864ca2f88604b  /tmp/rage128-cce3d-standalone.c.xz' \
+            | sha256sum -c -
+          xz -dc /tmp/rage128-cce3d-transform.py.xz \
+            > /tmp/rage128-cce3d-transform.py
+          xz -dc /tmp/rage128-cce3d-standalone.c.xz \
+            > /tmp/rage128-cce3d-standalone.c
+
+          # Retarget the guarded transformer to the current validated QEMU
+          # renderer and extend only the known emulator-boundary adaptations.
+          python3 - "$qemu_source" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path('/tmp/rage128-cce3d-transform.py')
+          text = path.read_text(encoding='utf-8')
+          old = 'QEMU_COMMIT = "23baad42d4f5c49478221763994949493151b9cf"'
+          new = f'QEMU_COMMIT = "{sys.argv[1]}"'
+          if text.count(old) != 1:
+              raise SystemExit('unexpected QEMU source-commit anchor')
+          text = text.replace(old, new, 1)
+
+          anchor = '''    text = text.replace(
+                  "memory_region_set_dirty(&s->vga.vram,",
+                  "rage128_mark_vram_dirty(s,",
+              )
+          '''
+          addition = anchor + '''    text = text.replace(
+                  "memory_region_set_dirty(&ctx->s->vga.vram,",
+                  "rage128_mark_vram_dirty(ctx->s,",
+              )
+          '''
+          if text.count(anchor) != 1:
+              raise SystemExit('cannot locate dirty-tracking adaptation')
+          text = text.replace(anchor, addition, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+          python3 -m py_compile /tmp/rage128-cce3d-transform.py
+
+          git config user.name 'Bryce Lanham'
+          git config user.email 'blanham@gmail.com'
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/86Box/86Box.git
+          git fetch --no-tags upstream master
+          git fetch --no-tags origin "$target"
+
+          upstream_sha=$(git rev-parse upstream/master)
+          source_sha=$(git rev-parse "origin/$target")
+          source_parent=$(git rev-parse "$source_sha^")
+          test "$(git rev-list --count "$source_parent..$source_sha")" = 1
+          git merge-base --is-ancestor "$source_parent" "$upstream_sha"
+
+          overlap=$(git diff --name-only "$source_parent..$upstream_sha" -- \
+            src/video/CMakeLists.txt \
+            src/video/vid_ati_rage128.c \
+            src/video/vid_ati_rage128.h \
+            src/video/vid_ati_rage128_accel.c)
+          if [[ -n "$overlap" ]]; then
+            echo 'Upstream changed a Rage 128 integration file:' >&2
+            printf '%s\n' "$overlap" >&2
+            exit 1
+          fi
+
+          git checkout -B rage128-cce3d-work "$upstream_sha"
+          git cherry-pick "$source_sha"
+          python3 /tmp/rage128-cce3d-transform.py
+
+          # Resolve names that mean different things at the emulator boundary,
+          # add the inline-primitive entry point, and keep the old standalone
+          # harness source-compatible with the current register vocabulary.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              if text.count(old) != 1:
+                  raise SystemExit(f'{label}: expected one exact anchor')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          regs = Path('src/video/vid_ati_rage128_qemu_regs.h')
+          text = regs.read_text(encoding='utf-8')
+          old = '#define R128_DST_TILE                           BIT(31)'
+          new = '#define R128_DST_PITCH_TILE                     BIT(31)'
+          if text.count(old) != 1:
+              raise SystemExit('unexpected generated destination-tile bit')
+          regs.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          renderer = Path('src/video/vid_ati_rage128_3d.c')
+          text = renderer.read_text(encoding='utf-8')
+          count = len(re.findall(r'\bR128_DST_TILE\b', text))
+          if count < 1:
+              raise SystemExit('generated renderer has no destination-tile use')
+          text = re.sub(r'\bR128_DST_TILE\b', 'R128_DST_PITCH_TILE', text)
+          text = re.sub(r'\bwindow_x\b', 'r128_draw_window_x', text)
+          text = re.sub(r'\bwindow_y\b', 'r128_draw_window_y', text)
+          renderer.write_text(text, encoding='utf-8')
+
+          pm4 = Path('src/video/vid_ati_rage128_pm4.c')
+          text = pm4.read_text(encoding='utf-8')
+          anchor = '''static void rage128_pm4_fault(rage128_t *s, const char *message)
+          {
+          '''
+          replacement = anchor + '    (void) message;\n'
+          if text.count(anchor) != 1:
+              raise SystemExit('unexpected PM4 fault helper')
+          pm4.write_text(text.replace(anchor, replacement, 1),
+                         encoding='utf-8')
+
+          header = Path('src/video/vid_ati_rage128.h')
+          text = header.read_text(encoding='utf-8')
+          indexed = '''bool rage128_3d_draw_indexed(rage128_t *dev, uint32_t address,
+                                       uint32_t size, uint32_t format,
+                                       uint32_t vc_cntl,
+                                       const uint32_t *index_words,
+                                       unsigned int index_dwords);
+          '''
+          inline = indexed + '''bool rage128_3d_draw_inline(rage128_t *dev, uint32_t format,
+                                      uint32_t vc_cntl,
+                                      const uint32_t *vertex_words,
+                                      unsigned int vertex_dwords);
+          '''
+          if 'bool rage128_3d_draw_inline' not in text:
+              if text.count(indexed) != 1:
+                  raise SystemExit('cannot locate indexed-draw prototype')
+              text = text.replace(indexed, inline, 1)
+          header.write_text(text, encoding='utf-8')
+
+          compat = Path('src/video/vid_ati_rage128_qemu_compat.h')
+          text = compat.read_text(encoding='utf-8')
+          marker = '#endif'
+          additions = r'''
+
+          #ifndef R128_GMC_BRUSH_SOLID_COLOR
+          #define R128_GMC_BRUSH_SOLID_COLOR  0x000000d0U
+          #define R128_GMC_DST_32BPP          0x00000600U
+          #define R128_GMC_SRC_DATATYPE_COLOR 0x00003000U
+          #define R128_ROP3_P                 0x00f00000U
+          #endif
+
+          '''
+          if 'R128_GMC_BRUSH_SOLID_COLOR' not in text:
+              pos = text.rfind(marker)
+              if pos < 0:
+                  raise SystemExit('compatibility header lacks final endif')
+              text = text[:pos] + additions + text[pos:]
+          if 'sextract32' not in text:
+              sextract = r'''
+          static inline int32_t
+          rage128_sextract32(uint32_t value, unsigned int start,
+                             unsigned int length)
+          {
+              return (int32_t)(value << (32U - start - length)) >>
+                     (32U - length);
+          }
+          #define sextract32 rage128_sextract32
+
+          '''
+              pos = text.rfind(marker)
+              text = text[:pos] + sextract + text[pos:]
+          compat.write_text(text, encoding='utf-8')
+          PY
+
+          git diff --check
+          test -s src/video/vid_ati_rage128_pm4.c
+          test -s src/video/vid_ati_rage128_3d.c
+          grep -q 'rage128_pm4_mm_write' src/video/vid_ati_rage128.c
+          grep -q 'rage128_3d_draw_inline' src/video/vid_ati_rage128_3d.c
+          grep -q 'ATI_3D_TEX_UNIT_COUNT' src/video/vid_ati_rage128_3d.c
+          grep -q 'vid_ati_rage128_pm4.c' src/video/CMakeLists.txt
+          ! grep -R -E 'qemu/osdep|hw/pci/pci_device|ui/console.h|ATIVGAState|pci_dma_' \
+              src/video/vid_ati_rage128_pm4.c \
+              src/video/vid_ati_rage128_3d.c
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ninja-build cmake python3 \
+            libfreetype-dev libgles2-mesa-dev libsdl3-dev libpng-dev \
+            libc6-dev librtmidi-dev libopenal-dev libslirp-dev \
+            libfluidsynth-dev libvdeplug-dev libserialport-dev libzstd-dev
+
+          cc -std=gnu23 -Wall -Wextra -Werror \
+            -DRAGE128_STANDALONE_TEST \
+            -Isrc/include -Isrc/video \
+            /tmp/rage128-cce3d-standalone.c \
+            src/video/vid_ati_rage128_pm4.c \
+            src/video/vid_ati_rage128_3d.c \
+            -lm -o /tmp/rage128-cce3d-test
+          /tmp/rage128-cce3d-test
+
+          cc -std=gnu23 -Wall -Wextra -Werror \
+            -fsanitize=address,undefined -fno-omit-frame-pointer \
+            -DRAGE128_STANDALONE_TEST \
+            -Isrc/include -Isrc/video \
+            /tmp/rage128-cce3d-standalone.c \
+            src/video/vid_ati_rage128_pm4.c \
+            src/video/vid_ati_rage128_3d.c \
+            -lm -o /tmp/rage128-cce3d-sanitize
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+          UBSAN_OPTIONS=halt_on_error=1 \
+            /tmp/rage128-cce3d-sanitize
+
+          cmake -S . -B build --preset dev_debug \
+            -D NEW_DYNAREC=on \
+            -D QT=off \
+            -D USE_QT6=off \
+            -D USE_SDL_SHADER=on
+          cmake --build build -j2
+
+          git add \
+            src/video/CMakeLists.txt \
+            src/video/vid_ati_rage128.c \
+            src/video/vid_ati_rage128.h \
+            src/video/vid_ati_rage128_accel.c \
+            src/video/vid_ati_rage128_pm4.c \
+            src/video/vid_ati_rage128_3d.c \
+            src/video/vid_ati_rage128_qemu_compat.h \
+            src/video/vid_ati_rage128_qemu_regs.h \
+            src/video/vid_ati_rage128_rop3.h
+          git commit --amend -m 'video: add ATI Rage 128 CCE/PM4 and textured 3D
+
+          Preserve the ROM-backed PF AGP and RE PCI board profiles, native
+          display, cursor, DDC, power management, and complete XAA-era 2D
+          engine while crossing the historical 3D submission boundary.
+
+          Add CCE microcode upload and readback, PCI-GART translation,
+          bus-master ring fetch, PIO submission, indirect buffers, and PM4
+          packet types 0 through 3. Decode the paint, blit, host-data,
+          indexed-primitive, and inline WALK_RING streams used by the
+          historical Linux DRM, Mesa r128, and Xorg Render drivers.
+
+          Add a deterministic software fixed-function renderer for points,
+          lines, triangle lists, fans, and strips with signed drawable offsets,
+          clipping, top-left coverage, flat/Gouraud/specular shading, color
+          masks, alpha test and blending, depth, and bounded guest work.
+
+          Implement both texture units with ST/S2T2 coordinates, RHW/RHW2
+          perspective correction, local-VRAM and PCI-GART reads, common packed
+          formats, repeat/mirror/clamp/border addressing, nearest and bilinear
+          sampling, mipmaps and trilinear filtering, historical combiners,
+          inline dual-texture composites, and Y8/A8 destinations. Unsupported
+          compressed or paletted formats, tiled texture offsets, chroma keying,
+          cylindrical wrapping, fog, stencil, anti-aliasing, unsupported
+          lighting, and nonzero LOD bias fail closed.
+
+          Adapt the validated QEMU core only at the emulator boundary: 86Box
+          PCI command state, physical DMA, MMIO dispatch, VRAM storage, and
+          dirty-page tracking. Validate with a strict standalone CCE/triangle
+          harness, ASan/UBSan, and a complete current-upstream Linux build.'
+
+          test "$(git rev-list --count "$upstream_sha..HEAD")" = 1
+          test "$(git merge-base "$upstream_sha" HEAD)" = "$upstream_sha"
+          test -z "$(git diff --name-only "$upstream_sha..HEAD" \
+                    | grep '^\.github/' || true)"
+          git diff --check "$upstream_sha..HEAD"
+
+          git push \
+            --force-with-lease=refs/heads/${target}:${source_sha} \
+            origin HEAD:"$target"
+          git push --force origin "$upstream_sha":"$staging"
