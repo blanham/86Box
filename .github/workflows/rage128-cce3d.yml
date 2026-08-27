@@ -24,11 +24,15 @@ jobs:
           staging=agent/rage128-cce3d-86box
           target=agent/rage128-upstream-20260823
           qemu_source=2a1e106358b83ca3fea63b9b376cd457d4983aa1
+          payload_commit=354712e6365e0ab8e3c24a05abce78ab77dd05e3
+          payload_base=https://raw.githubusercontent.com/blanham/86Box/${payload_commit}/.github/rage128-cce3d
 
-          cp .github/rage128-cce3d/transform.py.xz \
-             /tmp/rage128-cce3d-transform.py.xz
-          cp .github/rage128-cce3d/standalone.c.xz \
-             /tmp/rage128-cce3d-standalone.c.xz
+          curl --fail --location --retry 3 \
+            "$payload_base/transform.py.xz" \
+            -o /tmp/rage128-cce3d-transform.py.xz
+          curl --fail --location --retry 3 \
+            "$payload_base/standalone.c.xz" \
+            -o /tmp/rage128-cce3d-standalone.c.xz
           echo '004f36d030e42f347427b5bf6f2cadfa053609e0c885f8d721308f3ba5b014f2  /tmp/rage128-cce3d-transform.py.xz' \
             | sha256sum -c -
           echo '583370dacd9d9890b6754e83515d661477fc6d1e57f36fa5dfc864ca2f88604b  /tmp/rage128-cce3d-standalone.c.xz' \
@@ -38,8 +42,6 @@ jobs:
           xz -dc /tmp/rage128-cce3d-standalone.c.xz \
             > /tmp/rage128-cce3d-standalone.c
 
-          # Retarget the guarded transformer to the current validated QEMU
-          # renderer and extend only the known emulator-boundary adaptations.
           python3 - "$qemu_source" <<'PY'
           from pathlib import Path
           import sys
@@ -97,19 +99,9 @@ jobs:
           git cherry-pick "$source_sha"
           python3 /tmp/rage128-cce3d-transform.py
 
-          # Resolve names that mean different things at the emulator boundary,
-          # add the inline-primitive entry point, and keep the old standalone
-          # harness source-compatible with the current register vocabulary.
           python3 - <<'PY'
           from pathlib import Path
           import re
-
-          def replace_once(path, old, new, label):
-              p = Path(path)
-              text = p.read_text(encoding='utf-8')
-              if text.count(old) != 1:
-                  raise SystemExit(f'{label}: expected one exact anchor')
-              p.write_text(text.replace(old, new, 1), encoding='utf-8')
 
           regs = Path('src/video/vid_ati_rage128_qemu_regs.h')
           text = regs.read_text(encoding='utf-8')
