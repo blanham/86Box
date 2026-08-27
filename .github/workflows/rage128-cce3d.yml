@@ -11,7 +11,7 @@ permissions:
 jobs:
   validate:
     if: github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -119,6 +119,15 @@ jobs:
           text = re.sub(r'\bR128_DST_TILE\b', 'R128_DST_PITCH_TILE', text)
           text = re.sub(r'\bwindow_x\b', 'r128_draw_window_x', text)
           text = re.sub(r'\bwindow_y\b', 'r128_draw_window_y', text)
+          include = '#include "vid_ati_rage128_qemu_compat.h"\n'
+          if '#include <stdlib.h>' not in text:
+              if text.count(include) != 1:
+                  raise SystemExit('unexpected generated renderer include block')
+              text = text.replace(include, include + '#include <stdlib.h>\n', 1)
+          text = text.replace('g_new0(ATI3DVertex, count)',
+                              'calloc(count, sizeof(ATI3DVertex))')
+          if 'g_new0(' in text:
+              raise SystemExit('unadapted GLib allocator remains')
           renderer.write_text(text, encoding='utf-8')
 
           pm4 = Path('src/video/vid_ati_rage128_pm4.c')
@@ -134,21 +143,18 @@ jobs:
 
           header = Path('src/video/vid_ati_rage128.h')
           text = header.read_text(encoding='utf-8')
-          indexed = '''bool rage128_3d_draw_indexed(rage128_t *dev, uint32_t address,
-                                       uint32_t size, uint32_t format,
-                                       uint32_t vc_cntl,
-                                       const uint32_t *index_words,
-                                       unsigned int index_dwords);
+          if 'bool rage128_3d_draw_inline(' not in text:
+              anchor = 'void rage128_mmio_write_reg('
+              if text.count(anchor) != 1:
+                  raise SystemExit('unexpected MMIO prototype anchor')
+              pos = text.index(anchor)
+              prototype = '''bool rage128_3d_draw_inline(rage128_t *dev,
+                                          uint32_t format, uint32_t vc_cntl,
+                                          const uint32_t *vertex_words,
+                                          unsigned int vertex_dwords);
+
           '''
-          inline = indexed + '''bool rage128_3d_draw_inline(rage128_t *dev, uint32_t format,
-                                      uint32_t vc_cntl,
-                                      const uint32_t *vertex_words,
-                                      unsigned int vertex_dwords);
-          '''
-          if 'bool rage128_3d_draw_inline' not in text:
-              if text.count(indexed) != 1:
-                  raise SystemExit('cannot locate indexed-draw prototype')
-              text = text.replace(indexed, inline, 1)
+              text = text[:pos] + prototype + text[pos:]
           header.write_text(text, encoding='utf-8')
 
           compat = Path('src/video/vid_ati_rage128_qemu_compat.h')
@@ -193,7 +199,7 @@ jobs:
           grep -q 'rage128_3d_draw_inline' src/video/vid_ati_rage128_3d.c
           grep -q 'ATI_3D_TEX_UNIT_COUNT' src/video/vid_ati_rage128_3d.c
           grep -q 'vid_ati_rage128_pm4.c' src/video/CMakeLists.txt
-          ! grep -R -E 'qemu/osdep|hw/pci/pci_device|ui/console.h|ATIVGAState|pci_dma_' \
+          ! grep -R -E 'qemu/osdep|hw/pci/pci_device|ui/console.h|ATIVGAState|pci_dma_|g_new0' \
               src/video/vid_ati_rage128_pm4.c \
               src/video/vid_ati_rage128_3d.c
 
